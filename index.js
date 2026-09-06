@@ -1,6 +1,7 @@
 import bolt from "@slack/bolt";
 import { extractVendorIds, createEventDeduper } from "./lib/parse.js";
 import { setVendorVisibility } from "./lib/xano.js";
+import { askXano } from "./lib/ask.js";
 
 const { App, ExpressReceiver } = bolt;
 
@@ -24,6 +25,9 @@ const ALLOWED_USERS = (process.env.ALLOWED_USER_IDS || "")
   .filter(Boolean);
 
 const ENABLE_UNDO = process.env.ENABLE_UNDO !== "false";
+
+// Q&A is opt-in. It needs ANTHROPIC_API_KEY and XANO_MCP_URL to do anything.
+const ENABLE_ASK = process.env.ENABLE_ASK === "true";
 
 for (const key of ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "XANO_VISIBILITY_URL"]) {
   if (!process.env[key]) {
@@ -220,6 +224,78 @@ if (ENABLE_UNDO) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Q&A on mention (read-only)
+// ---------------------------------------------------------------------------
+
+function stripMention(text) {
+  return String(text || "")
+    .replace(/<@[A-Z0-9]+>/g, "")
+    .trim();
+}
+
+if (ENABLE_ASK) {
+  app.event("app_mention", async ({ event, client, body }) => {
+    if (isDuplicate(body?.event_id)) return;
+
+    const channel = event.channel;
+    // Answer inside the thread if mentioned in one, otherwise start a thread
+    // on the mention. Never reply top-level — a wrong answer shouldn't broadcast.
+    const thread_ts = event.thread_ts || event.ts;
+
+    if (ALLOWED_CHANNELS.length && !ALLOWED_CHANNELS.includes(channel)) return;
+
+    const question = stripMention(event.text);
+
+    if (!question) {
+      await reply(
+        client,
+        channel,
+        thread_ts,
+        "Ask me something about vendor or pricing data — e.g. `@Tulle Ops what pricing do we have for V2574?`\nI read from Xano only, and I'll tell you when I can't find something."
+      );
+      return;
+    }
+
+    if (question.length > 1000) {
+      await reply(client, channel, thread_ts, "That's a long one — trim it to a single question and I'll take another look.");
+      return;
+    }
+
+    // Visible acknowledgement; the API round-trip can take 10-30s.
+    await markDone(client, channel, event.ts, "eyes");
+
+    const result = await askXano(question);
+
+    if (result.error) {
+      console.error("askXano failed:", result.error);
+      await reply(
+        client,
+        channel,
+        thread_ts,
+        `I hit an error reaching the data (${result.error}). Check Xano directly: ${xanoTableLink()}`
+      );
+      return;
+    }
+
+    if (!result.grounded) {
+      await reply(
+        client,
+        channel,
+        thread_ts,
+        `I couldn't find anything in Xano that answers that, so I'd rather not guess. Worth checking by hand: ${xanoTableLink()}`
+      );
+      return;
+    }
+
+    const footer = result.toolsUsed.length
+      ? `\n\n_via ${[...new Set(result.toolsUsed)].join(", ")}_`
+      : "";
+
+    await reply(client, channel, thread_ts, `${result.text}${footer}`);
+  });
+}
+
 app.error(async (error) => {
   console.error("Unhandled Bolt error:", error);
 });
@@ -231,5 +307,6 @@ await app.start(port);
 console.log(`tulle-slackbot listening on :${port}`);
 console.log(`  trigger emoji : ${TRIGGER_EMOJI.map((e) => `:${e}:`).join(", ")}`);
 console.log(`  undo enabled  : ${ENABLE_UNDO}`);
+console.log(`  Q&A on mention: ${ENABLE_ASK ? "on" : "off"}`);
 console.log(`  channel lock  : ${ALLOWED_CHANNELS.length ? ALLOWED_CHANNELS.join(", ") : "none (all channels)"}`);
 console.log(`  user lock     : ${ALLOWED_USERS.length ? ALLOWED_USERS.join(", ") : "none (anyone in channel)"}`);

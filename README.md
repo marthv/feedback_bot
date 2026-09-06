@@ -114,6 +114,36 @@ Health check: `GET /health` returns `{"ok":true}`.
 - **`ALLOWED_USER_IDS` is empty by default**, meaning anyone in the channel can
   hide a vendor. Set it once you know who should have that power.
 
+## Q&A on mention (optional)
+
+Set `ENABLE_ASK=true` and the bot answers `@Tulle Ops <question>` from Xano
+data. Off by default.
+
+It calls the Claude API with the Xano MCP server attached, using an
+**allowlist**: `default_config.enabled: false` plus the read tools named in
+`lib/ask.js`. Any tool not on that list is disabled, including write tools added
+to Xano later. Change the list in `READ_TOOLS`.
+
+**Grounding, not confidence.** The bot answers from tool results or not at all.
+`lib/ask.js` checks the response for a non-error `mcp_tool_result` carrying
+actual content; without one it refuses and links to Xano. There is no confidence
+threshold, because model self-reported confidence is not calibrated — asking for
+"90% sure" produces confident wrong answers.
+
+Answers always land in a thread, never top-level, and are footed with the tools
+that produced them so anyone can verify.
+
+**Extra Slack scopes:** `app_mentions:read`. Extra bot event: `app_mention`.
+Both are in `manifest.yml`.
+
+**Before enabling, turn on authentication for the Xano MCP server.** Every tool
+currently shows Authentication: Disabled, which means anyone holding the
+connection URL can read the whole pricing dataset. Set `XANO_MCP_TOKEN` once
+auth is on.
+
+**Not free.** Each mention is an API call with tool round-trips. Use
+`ALLOWED_CHANNEL_IDS` to keep it to one channel.
+
 ## Environment variables
 
 See `.env.example`. Required: `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
