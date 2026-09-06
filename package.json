@@ -1,0 +1,17 @@
+{
+  "name": "tulle-slackbot",
+  "version": "1.0.0",
+  "description": "Slack bot that flips vendor visibility in Xano when a message is reacted to with the peeking-eye emoji.",
+  "type": "module",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.19.0"
+  }
+}
