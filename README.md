@@ -29,55 +29,86 @@ Bot replies in thread + adds ✅
 ```
 
 The Node service holds **no table config**. Column names live in Xano only. If you
-rename `visibility` later, nothing here changes.
+rename `Validated_Data` later, nothing here changes.
 
 ---
 
-## Step 1 — Build the Xano endpoint
+## Step 1 — The Xano endpoint (BUILT ✅)
 
-New API endpoint, method `POST`, path `/vendor/visibility`.
+Live as **ep279**, `POST /vendor/visibility` in API group **3 (`slack`, `api:aow91bcd`)**.
 
-**Inputs**
+```
+https://xqtb-2ma7-ijfy.n7e.xano.io/api:aow91bcd/vendor/visibility
+```
+
+Built and smoke-tested 2026-09-06. Nothing to do here unless you want to change behaviour.
+
+**Inputs** (JSON body)
 
 | name | type | notes |
 |---|---|---|
-| `vendor_id` | text | e.g. `V2574` |
-| `action` | text | `hide` or `unhide` |
-| `actor_slack_id` | text | audit only |
+| `vendor_id` | text | required, e.g. `V2574` |
+| `action` | text | required, `hide` or `unhide` |
+| `secret` | text | required in practice — must equal the literal in ep279's precondition |
+| `actor_slack_id` | text | audit only; lands in Xano request history |
 | `source` | text | audit only |
 
-**Function stack**
+**Response**
 
-1. **Precondition** — `$http_header.x-api-key == $env.slackbot_key`, else `401 Unauthorized`.
-   Add `slackbot_key` to your Xano environment variables with a long random string.
-2. **Get Record** from `WPTP Updated Mappings` (table 11) where `Vendor_ID = input.vendor_id` → var `vendor`.
-3. **Precondition** — `vendor != null`, else error `Vendor not found`.
-4. **Create Variable** `previous` = `vendor.visibility`.
-5. **Create Variable** `target` = `input.action == "hide" ? 0 : 1`.
-6. **Conditional** — if `previous == target`, return early:
-   ```json
-   { "vendor_id": "...", "vendor_name": "...", "previous_visibility": 0,
-     "new_visibility": 0, "changed": false }
-   ```
-7. **Edit Record** on `WPTP Updated Mappings`, id `vendor.id`, set `visibility = target`.
-8. **Response**
-   ```json
-   { "vendor_id": "...", "vendor_name": "...", "previous_visibility": 1,
-     "new_visibility": 0, "changed": true }
-   ```
+```json
+{ "vendor_id": "V4341", "vendor_name": "Laraudio",
+  "previous_visibility": 1, "new_visibility": 0, "changed": true }
+```
 
-⚠️ Confirm your exact column names before wiring this up — the spec above assumes
-`Vendor_ID` and `visibility`. Also map `vendor_name` to whatever your name column
-actually is (`Name`); it's optional but makes the confirmation message far more
-readable than a bare ID.
+`changed: false` means the reaction was redundant and no write happened.
 
-Test it with curl before touching Slack:
+### Verified schema (checked against the live workspace, 2026-09-06)
+
+| thing | value |
+|---|---|
+| table | `WPTP Updated Mappings` — table **11**, workspace 1. Display name has spaces; the XanoScript alias is `$db.WPTP_Updated_Mappings` |
+| vendor ID column | `Vendor_ID`, type **text** (e.g. `V2574`). Same spelling in table 10 (`WPTP PDFs`). Note table 36 uses `VENDOR_ID` — different table, don't mix them up |
+| visibility column | `Validated_Data`, type **text**, values `"1"` (visible) / `"0"` (hidden) |
+| name column | `Name`, type text |
+
+There is **no column called `visibility`** on table 11. `Validated_Data` is the real
+gate: production search (`ep119`) filters `Validated_Data == 1`, as do the
+`tool_wedding_search_*` MCP tools. There is a composite index on
+`(Category, Validated_Data, id)`, so the flip is cheap.
+
+⚠️ **It is a text column.** ep279 writes the strings `"1"` / `"0"` and casts to int only
+in the JSON response, so the Slack message reads `1 → 0` rather than `"1" → "0"`.
+
+⚠️ **ep119 caches for 7100s (~2 hours).** A hidden vendor keeps appearing in search
+until that entry expires. The Slack confirmation is telling the truth about the
+database and lying about what a couple sees. Either say so in the message copy, or
+have ep279 bump ep119's `cache_v` default after a successful write. **Not done yet.**
+
+**Auth.** ep279 is gated by a `secret` body field compared against a literal, matching
+`analytics_users_export` (ep205). The bot sends the same value as both the `X-Api-Key`
+header and the `secret` body field; only the body field is checked. XanoScript has no
+documented way to read request headers, which is why the header is not the gate.
+
+### Smoke test
+
+All seven of these passed on 2026-09-06 against `V4341` (a vendor already hidden, left
+exactly as found):
 
 ```bash
-curl -X POST "$XANO_VISIBILITY_URL" \
-  -H "Content-Type: application/json" \
-  -H "X-Api-Key: $XANO_API_KEY" \
-  -d '{"vendor_id":"V2574","action":"hide","actor_slack_id":"U000","source":"curl"}'
+U="https://xqtb-2ma7-ijfy.n7e.xano.io/api:aow91bcd/vendor/visibility"
+S="$XANO_API_KEY"
+
+# 403 — bad secret
+curl -s -X POST "$U" -H "Content-Type: application/json"   -d '{"vendor_id":"V4341","action":"hide","secret":"wrong"}'
+
+# 400 — Vendor not found
+curl -s -X POST "$U" -H "Content-Type: application/json"   -d "{\"vendor_id\":\"V999999\",\"action\":\"hide\",\"secret\":\"$S\"}"
+
+# 400 — action must be 'hide' or 'unhide'
+curl -s -X POST "$U" -H "Content-Type: application/json"   -d "{\"vendor_id\":\"V4341\",\"action\":\"delete\",\"secret\":\"$S\"}"
+
+# 200 — real flip. Run twice; the 2nd returns "changed": false
+curl -s -X POST "$U" -H "Content-Type: application/json"   -d "{\"vendor_id\":\"V4341\",\"action\":\"hide\",\"secret\":\"$S\",\"actor_slack_id\":\"U000\",\"source\":\"curl\"}"
 ```
 
 ## Step 2 — Create the Slack app
