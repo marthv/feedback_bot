@@ -1,5 +1,5 @@
 import bolt from "@slack/bolt";
-import { extractVendorIds, createEventDeduper, parseEditCommand } from "./lib/parse.js";
+import { extractVendorIds, createEventDeduper, parseEditCommand, MIN_DIGITS_TYPED } from "./lib/parse.js";
 import { setVendorVisibility } from "./lib/xano.js";
 import { askXano } from "./lib/ask.js";
 import { stageEdit, applyEdit, discardEdit, listEdits } from "./lib/edits.js";
@@ -515,7 +515,9 @@ async function handleVisibilityCommand({ text, user_id, channel_id, respond, act
     return;
   }
 
-  const { ids, primary, ambiguous } = extractVendorIds(text);
+  // Typed deliberately by a human, so accept V1-V99 too. The reaction handler
+  // above keeps the strict floor, where a loose match could hide a real vendor.
+  const { ids, primary, ambiguous } = extractVendorIds(text, { minDigits: MIN_DIGITS_TYPED });
   if (ambiguous) {
     await respond({ response_type: "ephemeral", text: `That names ${ids.length} vendors (${ids.join(", ")}) and I won't guess.` });
     return;
