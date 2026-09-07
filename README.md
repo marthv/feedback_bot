@@ -206,3 +206,57 @@ auth is on.
 
 See `.env.example`. Required: `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
 `XANO_VISIBILITY_URL`. Everything else has a working default.
+
+---
+
+## Phase 2 — Staged vendor edits (Xano side BUILT ✅, Slack side NOT started)
+
+Arbitrary field edits do **not** go through reactions. A reaction carries no parameters and
+writes immediately, which is fine for a reversible boolean and wrong for data. Instead:
+propose → review a diff → explicitly approve. Same shape as the feedback-triage tab and the
+vendor portal, both of which stage rather than apply.
+
+Nothing in this flow writes live data except `vendor/edit/apply`.
+
+| endpoint | id | what it does |
+|---|---|---|
+| `POST /vendor/edit/stage` | 280 | Validates the field, reads the live value, records a **proposal**. No live write. |
+| `POST /vendor/edit/apply` | 281 | The only live write. Re-validates, drift-checks, applies. |
+| `POST /vendor/edit/discard` | 282 | Rejects a proposal; the row is kept, not deleted. |
+| `GET /vendor/edit/pending` | 283 | The review queue. Read-only. |
+
+All four sit in API group 3 (`api:aow91bcd`) behind the same `secret` body field as ep279.
+Staged rows live in table **74 `pending_edit`**; the whitelist lives in **fn62
+`vendor_edit_field_spec`**.
+
+### Editable fields
+
+`Name`, `Website`, `Description`, `Contact_Information`, `Max_Capacity_Seated`,
+`Venue_Type`, `Type_of_Photography`, `Type_of_Entertainment`, `Type_of_Beauty`.
+
+Matching is case-insensitive and resolves to the canonical column, so `website` → `Website`.
+Widen the list by editing fn62 — **and add a matching branch in ep281**, which spells out
+every writable column because XanoScript's `db.edit` will not take a variable `data` block.
+Forgetting the branch throws a loud `configerror` rather than silently doing nothing.
+
+Deliberately **not** editable, with reasons in fn62's description: `Validated_Data` (owned by
+ep279), `Category` (gates the PI panel and filters), `State`/`Country` (denormalised into
+`flt_states`), `Address`/`lat`/`lng` (geocoding drift), all `flt_*`/`mk_*` (derived), anything
+in tables 36/62/63 (pricing — percentiles derive from it), and the entitlement fields.
+
+### Guarantees, all verified by smoke test
+
+- Forbidden field → 400 listing what *is* editable
+- Unknown vendor → 400
+- Staging a value equal to the current one → 400, keeps the queue clean
+- Re-staging the same vendor+field marks the earlier proposal `superseded`
+- Applying a superseded, discarded or already-applied row → 400
+- **Drift guard:** if the live value changed between propose and approve, apply refuses.
+  The approver never applies a diff different from the one they saw.
+- `previous_value` is retained after apply — that is the rollback source
+
+### Still to build (Slack side)
+
+Slash command or @mention → `stage` → post the diff with Approve/Discard buttons →
+`apply`/`discard`. Buttons need Slack **Interactivity** enabled and a second request URL;
+that is the bulk of the remaining work.
