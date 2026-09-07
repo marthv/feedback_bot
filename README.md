@@ -119,14 +119,41 @@ curl -s -X POST "$U" -H "Content-Type: application/json"   -d "{\"vendor_id\":\"
 4. Basic Information → copy the **Signing Secret**
 5. Invite the bot to the channel: `/invite @Tulle Ops`
 
-## Step 3 — Deploy to Railway
+## Step 3 — Railway (DEPLOYED ✅)
 
-1. Push this repo to GitHub
-2. Railway → **New Project** → **Deploy from GitHub repo**
-3. Variables → paste everything from `.env.example` with real values
-4. Settings → Networking → **Generate Domain**
-5. Back in the Slack app → **Event Subscriptions** → set Request URL to
-   `https://your-domain.up.railway.app/slack/events` → wait for *Verified*
+Project **tulle slackbot**, service **tulle-slackbot**, deploying `marthv/feedback_bot` @ `main`.
+
+```
+https://tulle-slackbot-production.up.railway.app
+```
+
+| id | value |
+|---|---|
+| project | `3144ae44-8da7-4667-8f54-421aed1592d5` |
+| service | `bab9bb11-2bd1-4ac8-9797-6c6992173756` |
+| environment (production) | `53156b69-045b-4478-9553-a1f4932e0e81` |
+
+Variables are set, **except the two Slack secrets**, which are placeholders
+(`SLACK_BOT_TOKEN=xoxb-REPLACE_ME`, `SLACK_SIGNING_SECRET=REPLACE_ME`).
+
+⚠️ **Until you replace them the service crashloops, and that is expected.** Bolt calls
+`auth.test` during `app.start()`, so a placeholder token is fatal:
+`Error: An API error occurred: invalid_auth`. The process does bind its port and serve
+`/health` for ~0.3s before dying, so a one-shot health check can return `{"ok":true}`
+and still be a dead service — check `list-deployments` status or the logs, not `/health`.
+`restartPolicyMaxRetries` is 10, so it stops retrying and sits CRASHED.
+
+Replace both variables after Step 2; saving them triggers a redeploy and it comes up
+clean. The startup banner is the thing to read — it echoes the resolved config.
+
+Then set the Slack app's **Event Subscriptions** Request URL to:
+
+```
+https://tulle-slackbot-production.up.railway.app/slack/events
+```
+
+and wait for *Verified*. Verification signs the request with the signing secret, so it
+fails until the real `SLACK_SIGNING_SECRET` is in place.
 
 Health check: `GET /health` returns `{"ok":true}`.
 
