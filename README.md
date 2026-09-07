@@ -255,8 +255,38 @@ in tables 36/62/63 (pricing — percentiles derive from it), and the entitlement
   The approver never applies a diff different from the one they saw.
 - `previous_value` is retained after apply — that is the rollback source
 
-### Still to build (Slack side)
+### Slack side (BUILT ✅)
 
-Slash command or @mention → `stage` → post the diff with Approve/Discard buttons →
-`apply`/`discard`. Buttons need Slack **Interactivity** enabled and a second request URL;
-that is the bulk of the remaining work.
+```
+/tulle edit V4341 Description = New blurb here
+/tulle edit V4341 Max_Capacity_Seated = 250
+/tulle pending          proposals awaiting approval
+/tulle applied          what has been applied
+/tulle help
+```
+
+The command **stages only**. It posts the diff into the channel with **Approve** and
+**Discard** buttons; only Approve reaches `vendor/edit/apply`. Everything after the first
+`=` is the value, so values may contain `=` (URLs work). The field name is not validated
+locally — Xano rejects unknown fields with a message naming the legal ones, which is a
+better error than this repo could produce.
+
+No second request URL is needed. Bolt's `ExpressReceiver` serves events, slash commands
+and interactivity on the **same** `/slack/events` path, which is why `manifest.yml` lists
+that one URL three times.
+
+`REQUIRE_SECOND_APPROVER=true` stops the proposer approving their own edit. Off by default.
+Discarding your own proposal is always allowed — withdrawing a suggestion is not what the
+rule exists to prevent. Either way Xano records `proposed_by` and `applied_by` separately,
+so a self-approval is visible in the audit trail even with the check off.
+
+### Re-installing after this change
+
+The app gained the `commands` scope and a slash command, so Slack needs the manifest
+re-applied and the app reinstalled:
+
+1. api.slack.com/apps → Tulle Ops → **App Manifest** → paste the updated `manifest.yml` → Save
+2. **Install App** → Reinstall to Workspace (the new scope forces this)
+3. Confirm **Interactivity & Shortcuts** is On with the same `/slack/events` URL
+
+`SLACK_BOT_TOKEN` changes on reinstall — copy the new `xoxb-…` into Railway.

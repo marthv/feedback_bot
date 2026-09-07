@@ -1,7 +1,8 @@
 import bolt from "@slack/bolt";
-import { extractVendorIds, createEventDeduper } from "./lib/parse.js";
+import { extractVendorIds, createEventDeduper, parseEditCommand } from "./lib/parse.js";
 import { setVendorVisibility } from "./lib/xano.js";
 import { askXano } from "./lib/ask.js";
+import { stageEdit, applyEdit, discardEdit, listEdits } from "./lib/edits.js";
 
 const { App, ExpressReceiver } = bolt;
 
@@ -28,6 +29,10 @@ const ENABLE_UNDO = process.env.ENABLE_UNDO !== "false";
 
 // Q&A is opt-in. It needs ANTHROPIC_API_KEY and XANO_MCP_URL to do anything.
 const ENABLE_ASK = process.env.ENABLE_ASK === "true";
+
+// Two-person rule. Off by default: on a small team it would block routine work.
+// When on, whoever proposed an edit cannot be the one who approves it.
+const REQUIRE_SECOND_APPROVER = process.env.REQUIRE_SECOND_APPROVER === "true";
 
 for (const key of ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET", "XANO_VISIBILITY_URL"]) {
   if (!process.env[key]) {
@@ -296,6 +301,197 @@ if (ENABLE_ASK) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Staged edits: /tulle edit … -> diff with buttons -> apply or discard
+//
+// The slash command NEVER writes live data. It stages a proposal in Xano and
+// posts the resulting diff for someone to approve. Only the Approve button
+// reaches vendor/edit/apply, the single live write in the flow.
+// ---------------------------------------------------------------------------
+
+function truncate(value, max = 300) {
+  const text = String(value ?? "");
+  if (!text.length) return "_(empty)_";
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+// The button carries the proposer's ID alongside the edit ID so the two-person
+// rule can be checked without a second round trip to Xano just to learn who
+// proposed it.
+function packAction(editId, proposerId) {
+  return `${editId}:${proposerId || ""}`;
+}
+function unpackAction(value) {
+  const [id, proposer = ""] = String(value || "").split(":");
+  return { editId: Number(id), proposerId: proposer };
+}
+
+function diffBlocks(staged, proposerId) {
+  const value = packAction(staged.edit_id, proposerId);
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${staged.vendor_name || staged.vendor_id}* (\`${staged.vendor_id}\`)\n*${staged.field_label || staged.field}*`,
+      },
+    },
+    {
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: `*Now*\n${truncate(staged.previous)}` },
+        { type: "mrkdwn", text: `*Proposed*\n${truncate(staged.proposed)}` },
+      ],
+    },
+    {
+      type: "actions",
+      elements: [
+        { type: "button", text: { type: "plain_text", text: "Approve" }, style: "primary", action_id: "edit_approve", value },
+        { type: "button", text: { type: "plain_text", text: "Discard" }, style: "danger", action_id: "edit_discard", value },
+      ],
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: `Staged #${staged.edit_id} by <@${proposerId}>. Nothing has changed yet.${
+            staged.superseded ? ` Superseded ${staged.superseded} earlier proposal(s).` : ""
+          }`,
+        },
+      ],
+    },
+  ];
+}
+
+const HELP = [
+  "*Editing vendor data from Slack*",
+  "",
+  "`/tulle edit V4341 Description = New blurb` — propose a change",
+  "`/tulle pending` — proposals waiting for approval",
+  "`/tulle applied` — what has been applied",
+  "",
+  "Proposing never changes anything. Someone has to press *Approve*.",
+  "Xano decides which fields are editable; try one and it will tell you.",
+].join("\n");
+
+app.command("/tulle", async ({ command, ack, respond }) => {
+  await ack();
+
+  if (ALLOWED_CHANNELS.length && !ALLOWED_CHANNELS.includes(command.channel_id)) {
+    await respond({ response_type: "ephemeral", text: "Not enabled in this channel." });
+    return;
+  }
+  if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(command.user_id)) {
+    await respond({ response_type: "ephemeral", text: "You're not on the approved list for vendor edits." });
+    return;
+  }
+
+  const parsed = parseEditCommand(command.text);
+
+  if (parsed.action === "help") {
+    await respond({ response_type: "ephemeral", text: HELP });
+    return;
+  }
+
+  if (parsed.action === "error" || parsed.action === "unknown") {
+    await respond({ response_type: "ephemeral", text: `${parsed.error}\n\n${HELP}` });
+    return;
+  }
+
+  if (parsed.action === "pending" || parsed.action === "applied") {
+    const status = parsed.action;
+    const result = await listEdits({ status });
+    if (!result.ok) {
+      await respond({ response_type: "ephemeral", text: `Couldn't read the queue — ${result.error}` });
+      return;
+    }
+    const items = result.items || [];
+    if (!items.length) {
+      await respond({ response_type: "ephemeral", text: `Nothing ${status}.` });
+      return;
+    }
+    const lines = items.map(
+      (i) =>
+        `#${i.id} · *${i.vendor_name || i.vendor_id}* · ${i.field}: ${truncate(i.previous_value, 40)} → ${truncate(i.new_value, 40)}`
+    );
+    await respond({ response_type: "ephemeral", text: `*${items.length} ${status}*\n${lines.join("\n")}` });
+    return;
+  }
+
+  const staged = await stageEdit({
+    vendorId: parsed.vendorId,
+    field: parsed.field,
+    newValue: parsed.value,
+    proposedBy: command.user_id,
+  });
+
+  if (!staged.ok) {
+    // Xano's rejection names the legal fields, so surface it verbatim.
+    await respond({ response_type: "ephemeral", text: `Couldn't stage that — ${staged.error}` });
+    return;
+  }
+
+  await respond({
+    response_type: "in_channel",
+    blocks: diffBlocks(staged, command.user_id),
+    text: `${staged.vendor_name}: ${staged.field} change proposed by <@${command.user_id}>`,
+  });
+});
+
+async function resolveEdit({ body, action, respond, approve }) {
+  const { editId, proposerId } = unpackAction(action.value);
+  const actor = body.user?.id;
+
+  if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(actor)) {
+    await respond({ replace_original: false, response_type: "ephemeral", text: "You're not on the approved list for vendor edits." });
+    return;
+  }
+
+  // Two-person rule. Discarding your own proposal is always fine — withdrawing
+  // a suggestion is not what the rule exists to prevent.
+  if (approve && REQUIRE_SECOND_APPROVER && proposerId && proposerId === actor) {
+    await respond({
+      replace_original: false,
+      response_type: "ephemeral",
+      text: `You proposed #${editId}, so someone else needs to approve it.`,
+    });
+    return;
+  }
+
+  const result = approve
+    ? await applyEdit({ editId, appliedBy: actor })
+    : await discardEdit({ editId, discardedBy: actor });
+
+  if (!result.ok) {
+    await respond({
+      replace_original: false,
+      response_type: "ephemeral",
+      text: `Couldn't ${approve ? "apply" : "discard"} #${editId} — ${result.error}`,
+    });
+    return;
+  }
+
+  const detail = approve
+    ? `${result.field_label || result.field}: ${truncate(result.previous, 80)} → ${truncate(result.new_value, 80)}`
+    : `${result.field} left unchanged`;
+
+  await respond({
+    replace_original: true,
+    text: `${approve ? "Applied" : "Discarded"} #${editId} — *${result.vendor_name || result.vendor_id}* (\`${result.vendor_id}\`). ${detail}. By <@${actor}>.`,
+  });
+}
+
+app.action("edit_approve", async ({ ack, body, action, respond }) => {
+  await ack();
+  await resolveEdit({ body, action, respond, approve: true });
+});
+
+app.action("edit_discard", async ({ ack, body, action, respond }) => {
+  await ack();
+  await resolveEdit({ body, action, respond, approve: false });
+});
+
 app.error(async (error) => {
   console.error("Unhandled Bolt error:", error);
 });
@@ -308,5 +504,6 @@ console.log(`tulle-slackbot listening on :${port}`);
 console.log(`  trigger emoji : ${TRIGGER_EMOJI.map((e) => `:${e}:`).join(", ")}`);
 console.log(`  undo enabled  : ${ENABLE_UNDO}`);
 console.log(`  Q&A on mention: ${ENABLE_ASK ? "on" : "off"}`);
+console.log(`  2nd approver  : ${REQUIRE_SECOND_APPROVER ? "required" : "not required"}`);
 console.log(`  channel lock  : ${ALLOWED_CHANNELS.length ? ALLOWED_CHANNELS.join(", ") : "none (all channels)"}`);
 console.log(`  user lock     : ${ALLOWED_USERS.length ? ALLOWED_USERS.join(", ") : "none (anyone in channel)"}`);

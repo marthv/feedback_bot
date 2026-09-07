@@ -6,6 +6,12 @@ features:
   bot_user:
     display_name: Tulle Ops
     always_online: true
+  slash_commands:
+    - command: /tulle
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Propose and approve vendor data edits
+      usage_hint: edit V4341 Description = New blurb
+      should_escape: false
 oauth_config:
   scopes:
     bot:
@@ -15,10 +21,15 @@ oauth_config:
       - reactions:read
       - reactions:write
       - app_mentions:read
+      - commands
 settings:
+  interactivity:
+    # Bolt's ExpressReceiver serves events, slash commands AND interactivity on
+    # the SAME path, so this is deliberately identical to the event URL below.
+    is_enabled: true
+    request_url: https://tulle-slackbot-production.up.railway.app/slack/events
   event_subscriptions:
-    # Replace with your Railway domain after first deploy.
-    request_url: https://YOUR-APP.up.railway.app/slack/events
+    request_url: https://tulle-slackbot-production.up.railway.app/slack/events
     bot_events:
       - reaction_added
       - reaction_removed
