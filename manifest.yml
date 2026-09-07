@@ -9,8 +9,35 @@ features:
   slash_commands:
     - command: /tulle
       url: https://tulle-slackbot-production.up.railway.app/slack/events
-      description: Hide vendors, propose data edits, check status
-      usage_hint: about | edit V4341 Description = New blurb | pending | status
+      description: What this bot does, and every command
+      usage_hint: about | status | edit | pending
+      should_escape: false
+    - command: /tulle-edit
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Propose a vendor data change (needs approval)
+      usage_hint: V4341 State = South Carolina
+      should_escape: false
+    - command: /tulle-hide
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Hide a vendor from search
+      usage_hint: V4341
+      should_escape: false
+    - command: /tulle-show
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Put a hidden vendor back in search
+      usage_hint: V4341
+      should_escape: false
+    - command: /tulle-pending
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Proposed changes waiting for approval
+      should_escape: false
+    - command: /tulle-applied
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Changes already applied, and who approved them
+      should_escape: false
+    - command: /tulle-status
+      url: https://tulle-slackbot-production.up.railway.app/slack/events
+      description: Current settings and whether Xano is reachable
       should_escape: false
 oauth_config:
   scopes:

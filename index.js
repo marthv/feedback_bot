@@ -373,8 +373,12 @@ function aboutText() {
   const lines = [
     "*Tulle Ops* — vendor data from Slack, without opening Xano.",
     "",
-    "*1. Hide a vendor — react, no typing*",
-    `React ${emoji} on any message containing a vendor ID (\`V4341\`, or a tulletogether.app vendor link).`,
+    "*Commands* — each has its own entry when you type `/`",
+    "`/tulle-edit` · `/tulle-hide` · `/tulle-show` · `/tulle-pending` · `/tulle-applied` · `/tulle-status`",
+    "",
+    "*1. Hide a vendor — react, or by ID*",
+    `React ${emoji} on any message containing a vendor ID (\`V4341\`, or a tulletogether.app vendor link),`,
+    "or run `/tulle-hide V4341` when there's no message to react to. `/tulle-show V4341` puts it back.",
     "The vendor stops appearing in search. I reply in thread and mark the message ✅.",
     ENABLE_UNDO
       ? "*Remove* the reaction to put it back — that works even for vendors hidden long ago by other means."
@@ -383,8 +387,10 @@ function aboutText() {
     "⏱ Search is cached ~2h, so a hidden vendor can linger there briefly. The database changes instantly.",
     "",
     "*2. Edit vendor details — propose, then approve*",
-    "`/tulle edit V4341 Description = New blurb here`",
-    "`/tulle edit V4341 Max_Capacity_Seated = 250`",
+    "`/tulle-edit V13831 State = South Carolina`",
+    "`/tulle-edit V4341 Max_Capacity_Seated = 250`",
+    "Editable: Name, State (or `location`), Address, Website, Description, Contact_Information,",
+    "Max_Capacity_Seated (or `capacity`), Venue_Type, Type_of_Photography / Entertainment / Beauty.",
     "Nothing changes when you run that. I post the before/after with *Approve* and *Discard* buttons;",
     "only Approve writes. Everything after the first `=` is the value, so URLs are fine.",
     REQUIRE_SECOND_APPROVER
@@ -427,19 +433,21 @@ async function statusText() {
   ].join("\n");
 }
 
-app.command("/tulle", async ({ command, ack, respond }) => {
-  await ack();
-
-  if (ALLOWED_CHANNELS.length && !ALLOWED_CHANNELS.includes(command.channel_id)) {
+// One implementation, several front doors. Each /tulle-* command is a thin
+// wrapper that hands the same text to this. Slack has no subcommand
+// autocomplete, so separate commands are the only way features show up when
+// someone types "/tulle" — but they should not be separate code paths.
+async function handleTulle({ text, user_id, channel_id, respond }) {
+  if (ALLOWED_CHANNELS.length && !ALLOWED_CHANNELS.includes(channel_id)) {
     await respond({ response_type: "ephemeral", text: "Not enabled in this channel." });
     return;
   }
-  if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(command.user_id)) {
+  if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(user_id)) {
     await respond({ response_type: "ephemeral", text: "You're not on the approved list for vendor edits." });
     return;
   }
 
-  const parsed = parseEditCommand(command.text);
+  const parsed = parseEditCommand(text);
 
   if (parsed.action === "about") {
     await respond({ response_type: "ephemeral", text: aboutText() });
@@ -480,7 +488,7 @@ app.command("/tulle", async ({ command, ack, respond }) => {
     vendorId: parsed.vendorId,
     field: parsed.field,
     newValue: parsed.value,
-    proposedBy: command.user_id,
+    proposedBy: user_id,
   });
 
   if (!staged.ok) {
@@ -491,9 +499,97 @@ app.command("/tulle", async ({ command, ack, respond }) => {
 
   await respond({
     response_type: "in_channel",
-    blocks: diffBlocks(staged, command.user_id),
-    text: `${staged.vendor_name}: ${staged.field} change proposed by <@${command.user_id}>`,
+    blocks: diffBlocks(staged, user_id),
+    text: `${staged.vendor_name}: ${staged.field} change proposed by <@${user_id}>`,
   });
+}
+
+// Hide / show by vendor ID, for when you don't have a message to react to.
+async function handleVisibilityCommand({ text, user_id, channel_id, respond, action }) {
+  if (ALLOWED_CHANNELS.length && !ALLOWED_CHANNELS.includes(channel_id)) {
+    await respond({ response_type: "ephemeral", text: "Not enabled in this channel." });
+    return;
+  }
+  if (ALLOWED_USERS.length && !ALLOWED_USERS.includes(user_id)) {
+    await respond({ response_type: "ephemeral", text: "You're not on the approved list for visibility changes." });
+    return;
+  }
+
+  const { ids, primary, ambiguous } = extractVendorIds(text);
+  if (ambiguous) {
+    await respond({ response_type: "ephemeral", text: `That names ${ids.length} vendors (${ids.join(", ")}) and I won't guess.` });
+    return;
+  }
+  if (!primary) {
+    await respond({ response_type: "ephemeral", text: "Give me a vendor ID, e.g. `/tulle-hide V4341`." });
+    return;
+  }
+
+  const result = await setVendorVisibility({ vendorId: primary, action, actor: user_id });
+  if (!result.ok) {
+    await respond({ response_type: "ephemeral", text: `Couldn't update *${primary}* — ${result.error}` });
+    return;
+  }
+
+  const label = result.vendor_name ? `*${result.vendor_name}* (\`${primary}\`)` : `*${primary}*`;
+  if (result.changed === false) {
+    await respond({
+      response_type: "ephemeral",
+      text: `${label} was already ${action === "hide" ? "hidden" : "visible"} — nothing to change.`,
+    });
+    return;
+  }
+
+  await respond({
+    response_type: "in_channel",
+    text: `${action === "hide" ? "Hidden" : "Restored"} ${label} — visibility ${result.previous_visibility} → ${result.new_visibility}. By <@${user_id}>.${
+      action === "hide" ? " Search is cached ~2h, so it may linger there briefly." : ""
+    }`,
+  });
+}
+
+// Registrations. Every one of these appears as its own row when you type "/"
+// in Slack, which is the whole point — /tulle alone hid four features behind
+// arguments Slack cannot advertise.
+const asCtx = (command) => ({
+  text: command.text,
+  user_id: command.user_id,
+  channel_id: command.channel_id,
+});
+
+app.command("/tulle", async ({ command, ack, respond }) => {
+  await ack();
+  await handleTulle({ ...asCtx(command), respond });
+});
+
+app.command("/tulle-edit", async ({ command, ack, respond }) => {
+  await ack();
+  await handleTulle({ ...asCtx(command), text: `edit ${command.text}`, respond });
+});
+
+app.command("/tulle-pending", async ({ command, ack, respond }) => {
+  await ack();
+  await handleTulle({ ...asCtx(command), text: "pending", respond });
+});
+
+app.command("/tulle-applied", async ({ command, ack, respond }) => {
+  await ack();
+  await handleTulle({ ...asCtx(command), text: "applied", respond });
+});
+
+app.command("/tulle-status", async ({ command, ack, respond }) => {
+  await ack();
+  await handleTulle({ ...asCtx(command), text: "status", respond });
+});
+
+app.command("/tulle-hide", async ({ command, ack, respond }) => {
+  await ack();
+  await handleVisibilityCommand({ ...asCtx(command), respond, action: "hide" });
+});
+
+app.command("/tulle-show", async ({ command, ack, respond }) => {
+  await ack();
+  await handleVisibilityCommand({ ...asCtx(command), respond, action: "unhide" });
 });
 
 async function resolveEdit({ body, action, respond, approve }) {

@@ -231,8 +231,19 @@ Staged rows live in table **74 `pending_edit`**; the whitelist lives in **fn62
 
 ### Editable fields
 
-`Name`, `Website`, `Description`, `Contact_Information`, `Max_Capacity_Seated`,
-`Venue_Type`, `Type_of_Photography`, `Type_of_Entertainment`, `Type_of_Beauty`.
+`Name`, `State`, `Address`, `Website`, `Description`, `Contact_Information`,
+`Max_Capacity_Seated`, `Venue_Type`, `Type_of_Photography`, `Type_of_Entertainment`,
+`Type_of_Beauty`.
+
+Friendly aliases are accepted so people can type what they'd say: `location` → `State`,
+`capacity` → `Max_Capacity_Seated`, `url` → `Website`, `contact` → `Contact_Information`,
+`blurb` → `Description`, `street` → `Address`.
+
+**`State` is safe to edit** because a `db.edit` from an endpoint fires the
+`flt_states_sync_on_vendor_write` trigger, which rebuilds `flt_states` — the column search
+actually filters on. Verified by test on V52, not assumed. **`Address` does not move
+`lat`/`lng`**, so the map pin stays where enrichment put it; a wholly relocated vendor needs
+re-enrichment, not a field edit.
 
 Matching is case-insensitive and resolves to the canonical column, so `website` → `Website`.
 Widen the list by editing fn62 — **and add a matching branch in ep281**, which spells out
@@ -240,9 +251,9 @@ every writable column because XanoScript's `db.edit` will not take a variable `d
 Forgetting the branch throws a loud `configerror` rather than silently doing nothing.
 
 Deliberately **not** editable, with reasons in fn62's description: `Validated_Data` (owned by
-ep279), `Category` (gates the PI panel and filters), `State`/`Country` (denormalised into
-`flt_states`), `Address`/`lat`/`lng` (geocoding drift), all `flt_*`/`mk_*` (derived), anything
-in tables 36/62/63 (pricing — percentiles derive from it), and the entitlement fields.
+ep279), `Category` (gates the PI panel and filters — one line away if you want it),
+`lat`/`lng`/`Place_ID` (desyncs the map pin from the address), all `flt_*`/`mk_*` (derived),
+anything in tables 36/62/63 (pricing — percentiles derive from it), and the entitlement fields.
 
 ### Guarantees, all verified by smoke test
 
@@ -257,34 +268,29 @@ in tables 36/62/63 (pricing — percentiles derive from it), and the entitlement
 
 ### Slack side (BUILT ✅)
 
-```
-/tulle                  what this bot does (also: about, help, ?)
-/tulle status           live settings + Xano reachability (also: config)
-/tulle edit V4341 Description = New blurb here
-/tulle edit V4341 Max_Capacity_Seated = 250
-/tulle pending          proposals awaiting approval (also: queue)
-/tulle applied          what has been applied, and who approved it (also: history)
-```
+Seven commands, each with its own row when you type `/` in Slack:
 
-**One command, subcommands underneath — on purpose.** Registering a new slash command
-means editing the manifest *and* reinstalling the app, and reinstalling rotates
-`SLACK_BOT_TOKEN`. A new subcommand needs only a deploy. So `/tulle` is the namespace and
-features go under it.
+| command | does |
+|---|---|
+| `/tulle` | what the bot does, and every command |
+| `/tulle-edit V13831 State = South Carolina` | propose a change (needs approval) |
+| `/tulle-hide V4341` | hide a vendor from search |
+| `/tulle-show V4341` | put it back |
+| `/tulle-pending` | proposals waiting for approval |
+| `/tulle-applied` | what was applied, and who approved it |
+| `/tulle-status` | live settings + Xano reachability |
 
-`/tulle` with no arguments describes the whole bot — the reaction flow, undo, edits,
-the queue and Q&A — and the text is **generated from the live config**, not hardcoded. If
-undo is off or Q&A is disabled, the description says so rather than describing a bot that
-isn't running.
+All seven route into **one** implementation (`handleTulle`) — separate commands exist only
+because Slack has no subcommand autocomplete, so `/tulle edit …` could never advertise
+itself. `/tulle edit`, `/tulle pending` etc. still work as subcommands.
 
-The command **stages only**. It posts the diff into the channel with **Approve** and
+`/tulle-edit` **stages only**. It posts the diff into the channel with **Approve** and
 **Discard** buttons; only Approve reaches `vendor/edit/apply`. Everything after the first
-`=` is the value, so values may contain `=` (URLs work). The field name is not validated
-locally — Xano rejects unknown fields with a message naming the legal ones, which is a
-better error than this repo could produce.
+`=` is the value, so values may contain `=` (URLs work).
 
 No second request URL is needed. Bolt's `ExpressReceiver` serves events, slash commands
-and interactivity on the **same** `/slack/events` path, which is why `manifest.yml` lists
-that one URL three times.
+and interactivity on the **same** `/slack/events` path, which is why every command in
+`manifest.yml` points at that one URL.
 
 `REQUIRE_SECOND_APPROVER=true` stops the proposer approving their own edit. Off by default.
 Discarding your own proposal is always allowed — withdrawing a suggestion is not what the
