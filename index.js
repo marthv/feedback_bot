@@ -364,16 +364,68 @@ function diffBlocks(staged, proposerId) {
   ];
 }
 
-const HELP = [
-  "*Editing vendor data from Slack*",
-  "",
-  "`/tulle edit V4341 Description = New blurb` — propose a change",
-  "`/tulle pending` — proposals waiting for approval",
-  "`/tulle applied` — what has been applied",
-  "",
-  "Proposing never changes anything. Someone has to press *Approve*.",
-  "Xano decides which fields are editable; try one and it will tell you.",
-].join("\n");
+// The description is GENERATED from the live config rather than written out as
+// a fixed string. A help text that describes an idealised bot instead of the
+// running one is worse than none — it tells you undo works when it is switched
+// off. Everything conditional below reads the same flag the handler reads.
+function aboutText() {
+  const emoji = TRIGGER_EMOJI.map((e) => `:${e}:`).join(" / ");
+  const lines = [
+    "*Tulle Ops* — vendor data from Slack, without opening Xano.",
+    "",
+    "*1. Hide a vendor — react, no typing*",
+    `React ${emoji} on any message containing a vendor ID (\`V4341\`, or a tulletogether.app vendor link).`,
+    "The vendor stops appearing in search. I reply in thread and mark the message ✅.",
+    ENABLE_UNDO
+      ? "*Remove* the reaction to put it back — that works even for vendors hidden long ago by other means."
+      : "_Undo is switched off, so removing the reaction does nothing._",
+    "Two vendor IDs in one message and I refuse rather than guess which you meant.",
+    "⏱ Search is cached ~2h, so a hidden vendor can linger there briefly. The database changes instantly.",
+    "",
+    "*2. Edit vendor details — propose, then approve*",
+    "`/tulle edit V4341 Description = New blurb here`",
+    "`/tulle edit V4341 Max_Capacity_Seated = 250`",
+    "Nothing changes when you run that. I post the before/after with *Approve* and *Discard* buttons;",
+    "only Approve writes. Everything after the first `=` is the value, so URLs are fine.",
+    REQUIRE_SECOND_APPROVER
+      ? "Someone other than the proposer must approve."
+      : "_Anyone allowed can approve, including the proposer._ Set `REQUIRE_SECOND_APPROVER=true` to change that.",
+    "If the value changed in Xano since you proposed it, Approve refuses — you'd be applying a stale diff.",
+    "",
+    "*3. See what is queued*",
+    "`/tulle pending` — proposals waiting on someone",
+    "`/tulle applied` — what has already gone through, and who approved it",
+    "",
+    "*4. Ask questions about the data*",
+    ENABLE_ASK
+      ? "`@Tulle Ops what pricing do we have for V2574?` — I answer from Xano only, in a thread, and say so when I can't find it."
+      : "_Off._ When on, mentioning me asks questions about vendor and pricing data. Deliberately disabled for now.",
+    "",
+    "`/tulle status` — current settings and whether Xano is reachable",
+  ];
+  return lines.join("\n");
+}
+
+async function statusText() {
+  const started = Date.now();
+  const probe = await listEdits({ status: "pending", perPage: 1 });
+  const ms = Date.now() - started;
+
+  return [
+    "*Tulle Ops — current settings*",
+    "",
+    `• Hide trigger: ${TRIGGER_EMOJI.map((e) => `:${e}:`).join(" / ")}`,
+    `• Undo on reaction removal: ${ENABLE_UNDO ? "on" : "off"}`,
+    `• Second approver required: ${REQUIRE_SECOND_APPROVER ? "yes" : "no"}`,
+    `• Q&A on mention: ${ENABLE_ASK ? "on" : "off"}`,
+    `• Channels: ${ALLOWED_CHANNELS.length ? ALLOWED_CHANNELS.map((c) => `<#${c}>`).join(", ") : "*any channel I'm in*"}`,
+    `• Who can act: ${ALLOWED_USERS.length ? ALLOWED_USERS.map((u) => `<@${u}>`).join(", ") : "*anyone in the channel*"}`,
+    "",
+    probe.ok
+      ? `• Xano: reachable (${ms}ms), ${probe.itemsTotal ?? 0} proposal(s) pending`
+      : `• Xano: *unreachable* — ${probe.error}`,
+  ].join("\n");
+}
 
 app.command("/tulle", async ({ command, ack, respond }) => {
   await ack();
@@ -389,13 +441,18 @@ app.command("/tulle", async ({ command, ack, respond }) => {
 
   const parsed = parseEditCommand(command.text);
 
-  if (parsed.action === "help") {
-    await respond({ response_type: "ephemeral", text: HELP });
+  if (parsed.action === "about") {
+    await respond({ response_type: "ephemeral", text: aboutText() });
+    return;
+  }
+
+  if (parsed.action === "status") {
+    await respond({ response_type: "ephemeral", text: await statusText() });
     return;
   }
 
   if (parsed.action === "error" || parsed.action === "unknown") {
-    await respond({ response_type: "ephemeral", text: `${parsed.error}\n\n${HELP}` });
+    await respond({ response_type: "ephemeral", text: `${parsed.error}\n\n${aboutText()}` });
     return;
   }
 

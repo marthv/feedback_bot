@@ -9,8 +9,8 @@ features:
   slash_commands:
     - command: /tulle
       url: https://tulle-slackbot-production.up.railway.app/slack/events
-      description: Propose and approve vendor data edits
-      usage_hint: edit V4341 Description = New blurb
+      description: Hide vendors, propose data edits, check status
+      usage_hint: about | edit V4341 Description = New blurb | pending | status
       should_escape: false
 oauth_config:
   scopes:

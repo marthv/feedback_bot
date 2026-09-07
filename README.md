@@ -258,12 +258,23 @@ in tables 36/62/63 (pricing — percentiles derive from it), and the entitlement
 ### Slack side (BUILT ✅)
 
 ```
+/tulle                  what this bot does (also: about, help, ?)
+/tulle status           live settings + Xano reachability (also: config)
 /tulle edit V4341 Description = New blurb here
 /tulle edit V4341 Max_Capacity_Seated = 250
-/tulle pending          proposals awaiting approval
-/tulle applied          what has been applied
-/tulle help
+/tulle pending          proposals awaiting approval (also: queue)
+/tulle applied          what has been applied, and who approved it (also: history)
 ```
+
+**One command, subcommands underneath — on purpose.** Registering a new slash command
+means editing the manifest *and* reinstalling the app, and reinstalling rotates
+`SLACK_BOT_TOKEN`. A new subcommand needs only a deploy. So `/tulle` is the namespace and
+features go under it.
+
+`/tulle` with no arguments describes the whole bot — the reaction flow, undo, edits,
+the queue and Q&A — and the text is **generated from the live config**, not hardcoded. If
+undo is off or Q&A is disabled, the description says so rather than describing a bot that
+isn't running.
 
 The command **stages only**. It posts the diff into the channel with **Approve** and
 **Discard** buttons; only Approve reaches `vendor/edit/apply`. Everything after the first
