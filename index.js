@@ -3,6 +3,7 @@ import { extractVendorIds, createEventDeduper, parseEditCommand, MIN_DIGITS_TYPE
 import { setVendorVisibility } from "./lib/xano.js";
 import { askXano } from "./lib/ask.js";
 import { stageEdit, applyEdit, discardEdit, listEdits } from "./lib/edits.js";
+import { startViewAs } from "./lib/impersonate.js";
 
 const { App, ExpressReceiver } = bolt;
 
@@ -21,6 +22,22 @@ const ALLOWED_CHANNELS = (process.env.ALLOWED_CHANNEL_IDS || "")
   .filter(Boolean);
 
 const ALLOWED_USERS = (process.env.ALLOWED_USER_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Admin "view as user" is gated separately from everything else in this file,
+// and its empty case is INVERTED on purpose.
+//
+// ALLOWED_CHANNELS and ALLOWED_USERS above mean "empty = allow everyone". That is
+// defensible for vendor edits: they are staged, reversible, and visible in channel.
+// A view-as session is none of those things — it hands someone a live session as a
+// real paying customer. So here empty means DENY, and the command simply does not
+// exist until somebody is named.
+//
+// Do NOT "fix" this to match the two lists above. That would turn an off switch
+// into an open door.
+const IMPERSONATE_USERS = (process.env.IMPERSONATE_USER_IDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -402,7 +419,12 @@ function aboutText() {
     "`/tulle pending` — proposals waiting on someone",
     "`/tulle applied` — what has already gone through, and who approved it",
     "",
-    "*4. Ask questions about the data*",
+    "*4. See what a customer sees*",
+    IMPERSONATE_USERS.length
+      ? "`/tulle view-as sara@example.com` — a private, single-use link that loads the app as them. Read-only: their data cannot change, and checkout, password changes and account deletion are refused."
+      : "_Off — nobody is on the view-as list._ Set `IMPERSONATE_USER_IDS` to switch it on.",
+    "",
+    "*5. Ask questions about the data*",
     ENABLE_ASK
       ? "`@Tulle Ops what pricing do we have for V2574?` — I answer from Xano only, in a thread, and say so when I can't find it."
       : "_Off._ When on, mentioning me asks questions about vendor and pricing data. Deliberately disabled for now.",
@@ -481,6 +503,49 @@ async function handleTulle({ text, user_id, channel_id, respond }) {
         `#${i.id} · *${i.vendor_name || i.vendor_id}* · ${i.field}: ${truncate(i.previous_value, 40)} → ${truncate(i.new_value, 40)}`
     );
     await respond({ response_type: "ephemeral", text: `*${items.length} ${status}*\n${lines.join("\n")}` });
+    return;
+  }
+
+  if (parsed.action === "view-as") {
+    // Deliberately its own check, not folded into ALLOWED_USERS. Someone trusted to
+    // fix a vendor's capacity is not automatically trusted to browse as a customer.
+    if (!IMPERSONATE_USERS.includes(user_id)) {
+      await respond({
+        response_type: "ephemeral",
+        text: "You're not on the view-as list. That list is separate from vendor edits, on purpose.",
+      });
+      return;
+    }
+
+    const started = await startViewAs({
+      target: parsed.target,
+      actorSlackId: user_id,
+      note: parsed.note,
+    });
+
+    if (!started.ok) {
+      // Xano's messages here are written for a human ("No account matches that
+      // email or id.", "Admin view-as is currently disabled."), so pass them through.
+      await respond({ response_type: "ephemeral", text: `Couldn't start that session — ${started.error}` });
+      return;
+    }
+
+    const who = started.target_name
+      ? `${started.target_name} (${started.target_email})`
+      : started.target_email;
+
+    await respond({
+      response_type: "ephemeral",
+      unfurl_links: false,
+      text: [
+        `*Viewing as ${who}*`,
+        `<${started.url}|Open the app as them>`,
+        "",
+        "Single use · link dies in 10 min · session lasts 15 min.",
+        "Open it in a *private/incognito window* — it replaces whatever session that browser has, and Exit signs you out.",
+        "Read-only: their row cannot change, and checkout, password changes and account deletion are refused.",
+      ].join("\n"),
+    });
     return;
   }
 
