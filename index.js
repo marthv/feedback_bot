@@ -3,7 +3,7 @@ import { extractVendorIds, createEventDeduper, parseEditCommand, MIN_DIGITS_TYPE
 import { setVendorVisibility } from "./lib/xano.js";
 import { askXano } from "./lib/ask.js";
 import { stageEdit, applyEdit, discardEdit, listEdits } from "./lib/edits.js";
-import { startViewAs } from "./lib/impersonate.js";
+import { customerSnapshot } from "./lib/impersonate.js";
 
 const { App, ExpressReceiver } = bolt;
 
@@ -421,8 +421,8 @@ function aboutText() {
     "",
     "*4. See what a customer sees*",
     IMPERSONATE_USERS.length
-      ? "`/tulle view-as sara@example.com` — a private, single-use link that loads the app as them. Read-only: their data cannot change, and checkout, password changes and account deletion are refused."
-      : "_Off — nobody is on the view-as list._ Set `IMPERSONATE_USER_IDS` to switch it on.",
+      ? "`/tulle view-as sara@example.com` — tells you what they can see: tier, days left, whether Pricing Intelligence is unlocked, free PDF views, and exactly what the upgrade banner offers them. Read-only."
+      : "_Off — nobody is on the lookup list._ Set `IMPERSONATE_USER_IDS` to switch it on.",
     "",
     "*5. Ask questions about the data*",
     ENABLE_ASK
@@ -453,6 +453,68 @@ async function statusText() {
       ? `• Xano: reachable (${ms}ms), ${probe.itemsTotal ?? 0} proposal(s) pending`
       : `• Xano: *unreachable* — ${probe.error}`,
   ].join("\n");
+}
+
+// Renders what a customer would see, in the order a support question needs it:
+// can they get in, is the thing they are complaining about locked, and what would
+// the upgrade cost them. Everything below is read-only.
+function ago(ms) {
+  if (!ms) return "never";
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function renderSnapshot({ user: u, upgrade: up }) {
+  const lines = [];
+  lines.push(`*${u.name || "(no name)"}* · ${u.email} · id ${u.id}`);
+  lines.push("");
+
+  // 1. Can they get in?
+  const access =
+    u.tier === "forever" ? "*Forever* — never expires"
+    : u.tier === "timed" ? `*Timed* — ${u.days_left} day${u.days_left === 1 ? "" : "s"} left, until ${u.access_until}`
+    : u.tier === "expired" ? `*Expired* — access ran out ${u.access_until}`
+    : "*Free* — never paid";
+  lines.push(`🔑 ${access}`);
+
+  // 2. The single most common support case: paid, but the numbers are still hidden.
+  lines.push(
+    u.pricing_intelligence_unlocked
+      ? "📊 Pricing Intelligence *unlocked*"
+      : `📊 Pricing Intelligence *LOCKED* — needs $50+ total paid, they've paid $${u.total_paid}`
+  );
+
+  // 3. The PDF meter.
+  const pdf = u.pdf_views_left;
+  lines.push(
+    pdf === null ? "📄 Free PDF views: unknown"
+    : pdf > 0 ? `📄 Free PDF views left: ${pdf}`
+    : "📄 Free PDF views: *none left*"
+  );
+
+  // 4. Exactly what the upgrade banner would say to them right now.
+  lines.push(
+    up.already_forever ? "⬆️ Upgrade banner: hidden (already Forever)"
+    : up.eligible ? `⬆️ Upgrade banner *SHOWING* — $${up.credit} credit, Forever for *$${up.final_price}* (normally $${up.forever_price})`
+    : "⬆️ Upgrade banner: not showing (not eligible)"
+  );
+
+  lines.push("");
+  lines.push(
+    `📈 ${u.pdfs_viewed} PDFs · ${u.vendors_viewed} vendors · ${u.favourites} saved · ${u.payments} payment${u.payments === 1 ? "" : "s"} totalling $${u.total_paid}`
+  );
+  lines.push(
+    `⏱ ${ago(u.last_active_at)}${u.last_vendor ? ` · last on *${u.last_vendor}*` : ""}`
+  );
+
+  const where = Array.isArray(u.location) && u.location.length ? u.location.join(", ") : "not set";
+  lines.push(`💍 ${where} · ${u.guests || "?"} guests · budget ${u.budget ? "$" + u.budget : "not set"}`);
+
+  return lines.join("\n");
 }
 
 // One implementation, several front doors. Each /tulle-* command is a thin
@@ -507,44 +569,28 @@ async function handleTulle({ text, user_id, channel_id, respond }) {
   }
 
   if (parsed.action === "view-as") {
-    // Deliberately its own check, not folded into ALLOWED_USERS. Someone trusted to
-    // fix a vendor's capacity is not automatically trusted to browse as a customer.
+    // Deliberately its own list, not ALLOWED_USERS. Someone trusted to fix a
+    // vendor's capacity is not automatically trusted to read a customer's
+    // payment history and entitlement state.
     if (!IMPERSONATE_USERS.includes(user_id)) {
       await respond({
         response_type: "ephemeral",
-        text: "You're not on the view-as list. That list is separate from vendor edits, on purpose.",
+        text: "You're not on the customer-lookup list. That list is separate from vendor edits, on purpose.",
       });
       return;
     }
 
-    const started = await startViewAs({
-      target: parsed.target,
-      actorSlackId: user_id,
-      note: parsed.note,
-    });
+    const snap = await customerSnapshot({ target: parsed.target, actorSlackId: user_id });
 
-    if (!started.ok) {
-      // Xano's messages here are written for a human ("No account matches that
-      // email or id.", "Admin view-as is currently disabled."), so pass them through.
-      await respond({ response_type: "ephemeral", text: `Couldn't start that session — ${started.error}` });
+    if (!snap.ok) {
+      await respond({ response_type: "ephemeral", text: `Couldn't look that up — ${snap.error}` });
       return;
     }
-
-    const who = started.target_name
-      ? `${started.target_name} (${started.target_email})`
-      : started.target_email;
 
     await respond({
       response_type: "ephemeral",
       unfurl_links: false,
-      text: [
-        `*Viewing as ${who}*`,
-        `<${started.url}|Open the app as them>`,
-        "",
-        "Single use · link dies in 10 min · session lasts 15 min.",
-        "Open it in a *private/incognito window* — it replaces whatever session that browser has, and Exit signs you out.",
-        "Read-only: their row cannot change, and checkout, password changes and account deletion are refused.",
-      ].join("\n"),
+      text: renderSnapshot(snap),
     });
     return;
   }
