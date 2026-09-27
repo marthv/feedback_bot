@@ -49,6 +49,10 @@ oauth_config:
       - reactions:write
       - app_mentions:read
       - commands
+      # im:write (2026-09-27): lets the daily endpoint health report (health-report-cron in
+      # tulle_vendor_data_updates) DM its reader. Tulle Ops, not Tulle Bot, because Tulle Bot
+      # owns the incoming webhooks Xano uses and a reinstall there can re-mint their URLs.
+      - im:write
 settings:
   interactivity:
     # Bolt's ExpressReceiver serves events, slash commands AND interactivity on
